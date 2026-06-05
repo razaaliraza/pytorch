@@ -486,6 +486,7 @@ jobs:
             -e ARTIFACTS_FILE_SUFFIX \
             -e TORCH_TPU \
             -e TORCH_TPU_TEXT_FILE \
+            -e OP_BENCHMARK_TESTS \
             ${TPU_DOCKER_FLAGS:-} \
             --memory="${TOTAL_AVAILABLE_MEMORY_IN_GB%.*}g" \
             --memory-swap="${TOTAL_MEMORY_WITH_SWAP}g" \
