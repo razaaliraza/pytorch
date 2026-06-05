@@ -1,6 +1,12 @@
 name: operator-microbenchmark-compare
 
 on:
+  pull_request:
+    paths:
+      - 'aten/src/ATen/native/**'
+      - 'torch/_decomp/**'
+      - 'torch/_refs/**'
+      - 'torch/csrc/**'
   workflow_dispatch:
     inputs:
       operator:
@@ -47,12 +53,41 @@ jobs:
       curr_branch: ${{ github.head_ref || github.ref_name }}
       curr_ref_type: ${{ github.ref_type }}
 
+  # ---- Auto-detect operators from PR diff ----
+  detect-operators:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    outputs:
+      op_tests: ${{ steps.perfmap.outputs.op_tests }}
+      has_ops: ${{ steps.perfmap.outputs.has_ops }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Install tree-sitter
+        run: pip install tree-sitter==0.24.0 tree-sitter-cpp==0.23.5 tree-sitter-python==0.23.6
+      - name: Run perfmap
+        id: perfmap
+        run: |
+          OP_LINE=$(python tools/testing/perfmap.py "${{ github.event.pull_request.base.sha }}" | grep '^OP_BENCHMARK_TESTS=')
+          OP_TESTS="${OP_LINE#OP_BENCHMARK_TESTS=}"
+          echo "op_tests=${OP_TESTS}" >> "$GITHUB_OUTPUT"
+          if [ -n "$OP_TESTS" ]; then
+            echo "has_ops=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_ops=false" >> "$GITHUB_OUTPUT"
+          fi
+
   # ---- CUDA build for H100 / A100 (sm80) ----
   build-cuda:
-    if: github.repository_owner == 'pytorch' && (inputs.gpu == 'H100' || inputs.gpu == 'A100')
+    if: >-
+      github.repository_owner == 'pytorch' && (
+        (github.event_name == 'workflow_dispatch' && (inputs.gpu == 'H100' || inputs.gpu == 'A100')) ||
+        (github.event_name == 'pull_request' && needs.detect-operators.outputs.has_ops == 'true')
+      )
     name: build-cuda
     uses: ./.github/workflows/_linux-build.yml
-    needs: get-label-type
+    needs: [get-label-type, detect-operators]
     with:
       runner: linux.12xlarge.memory
       build-environment: linux-jammy-cuda12.8-py3.10-gcc11-sm80
@@ -60,16 +95,20 @@ jobs:
       cuda-arch-list: '8.0 9.0'
       test-matrix: |
         { include: [
-          { config: "operator_microbenchmark_${{ inputs.operator }}_test", shard: 1, num_shards: 1, runner: "${{ inputs.gpu == 'H100' && 'linux.aws.h100' || 'linux.aws.a100' }}" },
-          { config: "operator_microbenchmark_${{ inputs.operator }}_baseline", shard: 1, num_shards: 1, runner: "${{ inputs.gpu == 'H100' && 'linux.aws.h100' || 'linux.aws.a100' }}" }
+          { config: "${{ github.event_name == 'pull_request' && 'operator_microbenchmark_test' || format('operator_microbenchmark_{0}_test', inputs.operator) }}", shard: 1, num_shards: 1, runner: "${{ github.event_name == 'pull_request' && 'linux.aws.h100' || (inputs.gpu == 'H100' && 'linux.aws.h100' || 'linux.aws.a100') }}", op_benchmark_tests: "${{ github.event_name == 'pull_request' && needs.detect-operators.outputs.op_tests || '' }}" },
+          { config: "${{ github.event_name == 'pull_request' && 'operator_microbenchmark_baseline' || format('operator_microbenchmark_{0}_baseline', inputs.operator) }}", shard: 1, num_shards: 1, runner: "${{ github.event_name == 'pull_request' && 'linux.aws.h100' || (inputs.gpu == 'H100' && 'linux.aws.h100' || 'linux.aws.a100') }}", op_benchmark_tests: "${{ github.event_name == 'pull_request' && needs.detect-operators.outputs.op_tests || '' }}" }
         ]}
     secrets: inherit
 
   test-cuda:
-    if: github.repository_owner == 'pytorch' && (inputs.gpu == 'H100' || inputs.gpu == 'A100')
+    if: >-
+      github.repository_owner == 'pytorch' && (
+        (github.event_name == 'workflow_dispatch' && (inputs.gpu == 'H100' || inputs.gpu == 'A100')) ||
+        (github.event_name == 'pull_request' && needs.detect-operators.outputs.has_ops == 'true')
+      )
     name: test-cuda
     uses: ./.github/workflows/_linux-test.yml
-    needs: build-cuda
+    needs: [build-cuda, detect-operators]
     with:
       timeout-minutes: 120
       build-environment: ${{ needs.build-cuda.outputs.build-environment }}
@@ -79,7 +118,7 @@ jobs:
 
   # ---- CUDA build for B200 (sm100) ----
   build-b200:
-    if: github.repository_owner == 'pytorch' && inputs.gpu == 'B200'
+    if: github.repository_owner == 'pytorch' && github.event_name == 'workflow_dispatch' && inputs.gpu == 'B200'
     name: build-b200
     uses: ./.github/workflows/_linux-build.yml
     needs: get-label-type
@@ -102,7 +141,7 @@ jobs:
     secrets: inherit
 
   test-b200:
-    if: github.repository_owner == 'pytorch' && inputs.gpu == 'B200'
+    if: github.repository_owner == 'pytorch' && github.event_name == 'workflow_dispatch' && inputs.gpu == 'B200'
     name: test-b200
     uses: ./.github/workflows/_linux-test.yml
     needs:
@@ -121,7 +160,7 @@ jobs:
 
   # ---- ROCm build for MI300X ----
   build-rocm:
-    if: github.repository_owner == 'pytorch' && inputs.gpu == 'MI300X'
+    if: github.repository_owner == 'pytorch' && github.event_name == 'workflow_dispatch' && inputs.gpu == 'MI300X'
     name: build-rocm
     uses: ./.github/workflows/_linux-build.yml
     with:
@@ -135,7 +174,7 @@ jobs:
     secrets: inherit
 
   test-rocm:
-    if: github.repository_owner == 'pytorch' && inputs.gpu == 'MI300X'
+    if: github.repository_owner == 'pytorch' && github.event_name == 'workflow_dispatch' && inputs.gpu == 'MI300X'
     name: test-rocm
     uses: ./.github/workflows/_rocm-test.yml
     needs: build-rocm
@@ -154,12 +193,12 @@ jobs:
         needs.test-b200.result == 'success' ||
         needs.test-rocm.result == 'success'
       )
-    needs: [test-cuda, test-b200, test-rocm]
+    needs: [test-cuda, test-b200, test-rocm, detect-operators]
     runs-on: ubuntu-latest
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      OPERATOR: ${{ inputs.operator }}
-      GPU: ${{ inputs.gpu }}
+      OPERATOR: ${{ inputs.operator || needs.detect-operators.outputs.op_tests || 'perfmap' }}
+      GPU: ${{ inputs.gpu || 'H100' }}
       S3_BUCKET: gha-artifacts
       REPO: pytorch/pytorch
     steps:
@@ -199,8 +238,13 @@ jobs:
           RUN_ID="${{ github.run_id }}"
           ATTEMPT="${{ github.run_attempt }}"
           RUNNER="${{ steps.runner.outputs.runner }}"
-          BRANCH_CONFIG="operator_microbenchmark_${OPERATOR}_test"
-          BASELINE_CONFIG="operator_microbenchmark_${OPERATOR}_baseline"
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            BRANCH_CONFIG="operator_microbenchmark_test"
+            BASELINE_CONFIG="operator_microbenchmark_baseline"
+          else
+            BRANCH_CONFIG="operator_microbenchmark_${OPERATOR}_test"
+            BASELINE_CONFIG="operator_microbenchmark_${OPERATOR}_baseline"
+          fi
 
           JOBS=$(gh api "repos/${REPO}/actions/runs/${RUN_ID}/attempts/${ATTEMPT}/jobs" --paginate -q '.jobs[]')
 
@@ -250,8 +294,9 @@ jobs:
           branch_sha = os.environ["BRANCH_SHA"][:7]
           run_url = os.environ["RUN_URL"]
 
+          title = f"Operator Microbenchmark: `{operator}` on {gpu}" if " " not in operator else f"Operator Microbenchmark (perfmap) on {gpu}"
           body = (
-              f"## Operator Microbenchmark: `{operator}` on {gpu}\n\n"
+              f"## {title}\n\n"
               "| | |\n"
               "|---|---|\n"
               f"| **Branch** | `{branch_ref}` (`{branch_sha}`) |\n"
